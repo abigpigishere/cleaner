@@ -215,3 +215,5 @@ progress:indeterminate::-webkit-progress-bar{background:transparent}
 .preview-operation{display:flex;align-items:center;gap:10px;font-size:11px;color:var(--muted);margin:10px 0}.preview-operation select{color:var(--ink)}
 .preview-note{font-size:11px;color:var(--muted);line-height:1.7;margin:4px 0}.preview-covered{font-size:11px;color:#946c22;background:#fff5e4;border-radius:4px;padding:5px 8px}
 .preview-footer{position:sticky;bottom:0;display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;background:white;border-top:1px solid var(--line);padding:12px 20px;font-size:11px;color:var(--muted)}
+
+.preview-operation{flex-wrap:wrap}.move-destination{flex:1;min-width:240px;border:1px solid var(--line);border-radius:5px;padding:6px 8px;font:11px var(--mono)}

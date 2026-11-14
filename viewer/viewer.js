@@ -67,13 +67,15 @@ function syncSelection(){
  $('previewSelection').disabled=!selectedItems.size;$('clearSelection').disabled=!selectedItems.size;
  const count=pageRows.filter(r=>selectedItems.has(r.id)).length;$('selectPage').checked=!!pageRows.length&&count===pageRows.length;$('selectPage').indeterminate=count>0&&count<pageRows.length;
 }
+function selectionRequest(){return {scan_id:adviceData.scan_id,revision:adviceData.revision,items:[...selectedItems].map(([id,v])=>({id,operation:v.operation})),destinations:Object.fromEntries([...selectedItems].map(([id,v])=>[id,v.destination||''])),delete_modes:Object.fromEntries([...selectedItems].map(([id,v])=>[id,v.deleteMode||'recycle']))}}
 async function previewSelection(){
  if(!selectedItems.size)return;
+ $('previewTitle').textContent='处理清单预览';$('previewDescription').textContent='当前为预览，尚未执行文件操作。';$('prepareExecution').classList.remove('hidden');
  const request=++previewRequest;const dialog=$('planPreview');if(!dialog.open)dialog.showModal();
  $('previewRows').replaceChildren(el('div','正在核对本次扫描和处理方式…','advice-empty'));$('previewSaved').textContent='';$('downloadPreview').classList.add('hidden');
  try{
   if(adviceData?.generation!==meta.generation)await loadAdvice();
-  const data=await api('preview',{}, {scan_id:adviceData.scan_id,revision:adviceData.revision,items:[...selectedItems].map(([id,v])=>({id,operation:v.operation}))});
+  const data=await api('preview',{}, selectionRequest());
   if(request!==previewRequest)return;
   $('previewSummary').textContent='已选 '+num(data.selected_count)+' 项 · 去重占用 '+fmt(data.occupied_bytes)+(data.covered_count?' · '+num(data.covered_count)+' 项包含在父目录中':'')+'。可释放量需在后续执行后核实。';
   const rows=$('previewRows');rows.replaceChildren();
@@ -82,12 +84,48 @@ async function previewSelection(){
    const path=el('div',item.path,'advice-path'),label=el('label',null,'preview-operation'),operation=el('select');operation.setAttribute('aria-label','处理方式 '+item.name);
    for(const code of item.allowed_operations){const option=el('option',adviceData.operation_labels[code]||code);option.value=code;operation.append(option)}operation.value=item.operation;
    operation.onchange=()=>{const entry=selectedItems.get(item.id);if(entry)entry.operation=operation.value;previewSelection()};label.append(el('span','计划方式'),operation);
-   card.append(heading,path,label,el('p',item.reason,'advice-reason'));if(item.covered_by!=null)card.append(el('p','占用已计入所选父目录，不重复相加。','preview-covered'));
+   if(item.operation==='move'&&!item.manual_game_move){
+    const target=el('input');target.type='text';target.className='move-destination';target.placeholder='完整目标路径，例如 E:\\资料\\文件名（父目录需已存在）';target.value=selectedItems.get(item.id)?.destination||'';target.setAttribute('aria-label','迁移目标 '+item.name);target.oninput=()=>{selectedItems.get(item.id).destination=target.value};target.onchange=()=>previewSelection();label.append(target);
+   }
+   if(item.operation==='recycle'){
+    const deletion=el('select');deletion.setAttribute('aria-label','删除方式 '+item.name);
+    for(const [code,text] of [['recycle','移入回收站'],['permanent','永久删除（不可恢复）']]){const option=el('option',text);option.value=code;deletion.append(option)}
+    deletion.value=selectedItems.get(item.id)?.deleteMode||'recycle';deletion.onchange=()=>{selectedItems.get(item.id).deleteMode=deletion.value;previewSelection()};label.append(deletion);
+   }
+   card.append(heading,path,label,el('p',item.reason,'advice-reason'));
+   if(item.operation==='uninstall'){
+    const inspect=el('button','查看关联安装信息');inspect.type='button';inspect.onclick=async()=>{inspect.disabled=true;try{const result=await api('apps',{id:item.id});card.append(el('p',result.apps.length?result.apps.map(a=>a.name+(a.version?' '+a.version:'')).join('；'):'未匹配到明确安装信息，请在系统应用列表中核对。','preview-note'))}catch(error){card.append(el('p',error.message,'preview-note'))}};card.append(inspect);
+   }
+if(item.covered_by!=null)card.append(el('p','占用已计入所选父目录，不重复相加。','preview-covered'));
    for(const note of item.notes)card.append(el('p',note,'preview-note'));
    if(item.estimated_release_bytes===0)card.append(el('p','此方式预计立即释放：0 B','preview-note'));rows.append(card);
   }
-  $('previewSaved').textContent='只读清单已保存，未执行文件操作。';$('downloadPreview').href=new URL('api/preview',base).href;$('downloadPreview').classList.remove('hidden');
+  $('prepareExecution').disabled=!data.items.some(i=>['move','recycle','uninstall'].includes(i.operation));$('previewSaved').textContent='清单已保存，尚未执行文件操作。';$('downloadPreview').href=new URL('api/preview',base).href;$('downloadPreview').classList.remove('hidden');
  }catch(error){if(request===previewRequest){$('previewSummary').textContent='无法生成预览';$('previewRows').replaceChildren(el('div',error.message,'advice-empty'))}}
+}
+async function prepareExecution(){
+ $('prepareExecution').disabled=true;
+ try{
+  const ticket=await api('operations/prepare',{},selectionRequest());
+  const names={delete:'永久删除（不可恢复）',recycle:'移入回收站',move:'校验后迁移',uninstall_settings:'打开 Windows 卸载入口（需你继续操作）',game_storage:'打开游戏迁移入口（需你继续操作）'};
+  const lines=ticket.entries.map(e=>names[e.operation]+'：'+e.source+(e.destination?' → '+e.destination:'')+(e.current_items?'（本次核对 '+e.current_items+' 项，逻辑量 '+fmt(e.current_logical_bytes)+'）':''));
+  if(ticket.manual_items.length)lines.push(ticket.manual_items.length+' 项仅查看或应用缓存，本次不执行。');
+  if(!window.confirm('确认执行以下具体操作？\n\n'+lines.join('\n')+(ticket.permanent_delete?'\n\n包含永久删除，不能通过回收站恢复。':'')))return;
+  await api('operations/execute',{}, {ticket:ticket.ticket,ack:ticket.ack});
+  $('prepareExecution').classList.add('hidden');$('previewDescription').textContent='已提交确认清单，正在处理。';$('previewRows').replaceChildren(el('div','正在执行，请等待结果…','advice-empty'));
+  const poll=async()=>{
+   try{
+    const result=await api('operations/status',{ticket:ticket.ticket});
+    if(result.status==='running'){setTimeout(poll,700);return}
+    $('previewTitle').textContent='处理结果';$('previewDescription').textContent='仅处理了确认清单中的项目；扫描索引尚未更新，请重新扫描查看最新目录。';
+    const rows=$('previewRows');rows.replaceChildren();
+    for(const item of result.items){const card=el('article',null,'preview-item');card.append(el('b',item.name),el('div',item.source,'advice-path'),el('p',item.status==='completed'?'已完成':item.status==='awaiting_user'?'需要在应用界面继续':'未完成','advice-reason'));if(item.destination)card.append(el('p','目标：'+item.destination,'preview-note'));if(item.error||item.message)card.append(el('p',item.error||item.message,'preview-note'));rows.append(card)}
+    const changes=Object.entries(result.free_space_delta_bytes||{}).map(([drive,n])=>drive+' 可用空间变化 '+(n<0?'-':'+')+fmt(Math.abs(n)));
+    $('previewSummary').textContent=changes.join(' · ')||result.error||'处理结束';$('previewSaved').textContent='结果已记录。';selectedItems.clear();syncSelection();
+   }catch(error){$('previewSaved').textContent='查询结果失败：'+error.message}
+  };poll();
+ }catch(error){$('previewSaved').textContent='未开始：'+error.message}
+ finally{$('prepareExecution').disabled=false}
 }
 async function navigate(id){
  parent=id;mode='tree';offset=0;selected=null;applyMode();$('treeTab').classList.add('active');$('filesTab').classList.remove('active');$('searchForm').classList.add('hidden');$('back').disabled=id===rootId;$('rows').parentElement.parentElement.scrollTop=0;
@@ -179,7 +217,7 @@ async function pollScan(){
 }
 async function startScan(){if(scanning)return;const target=$('targetPath').value.trim();try{scanControls(true);$('scanPhase').textContent='提交只读扫描请求';$('scanProgress').removeAttribute('value');$('scanElapsed').textContent='总用时 0.00s';$('scanRecords').textContent='如弹出 Windows 管理员授权，请确认后继续。';await api('scan',{}, {target});await pollScan()}catch(e){scanControls(false);status(e.message);$('scanPhase').textContent='未开始扫描';$('scanRecords').textContent=e.message;$('scanProgress').value=0}}
 async function pickFolder(){try{$('pickFolder').disabled=true;await api('pick-folder',{},{});$('scanPhase').textContent='请在系统窗口选择文件夹';const check=async()=>{try{const state=await api('picker-status');if(state.status==='waiting')return setTimeout(check,300);$('pickFolder').disabled=scanning;if(state.path){$('targetPath').value=state.path;$('driveSelect').value=state.path.slice(0,2).toUpperCase()+'\\';$('scanPhase').textContent='文件夹已选择，点击开始扫描';$('scanRecords').textContent='文件夹模式会扫描所在卷，再显示所选目录范围。'}else if(state.error)status(state.error);else $('scanPhase').textContent='已取消选择'}catch(e){$('pickFolder').disabled=scanning;status(e.message)}};check()}catch(e){$('pickFolder').disabled=scanning;status(e.message)}}
-$('reloadPlan').onclick=()=>{adviceData=null;loadAdvice()};$('previewSelection').onclick=previewSelection;$('closePreview').onclick=()=>{previewRequest++;$('planPreview').close()};$('clearSelection').onclick=()=>{selectedItems.clear();syncSelection()};$('selectAdvice').onclick=()=>{for(const row of adviceRowsVisible)addSelection(row);syncSelection()};$('selectPage').onchange=()=>{for(const row of pageRows){if($('selectPage').checked)addSelection(row);else selectedItems.delete(row.id)}syncSelection()};$('minFileSize').onchange=$('fileType').onchange=()=>{offset=0;load()};
+$('reloadPlan').onclick=()=>{adviceData=null;loadAdvice()};$('prepareExecution').onclick=prepareExecution;$('previewSelection').onclick=previewSelection;$('closePreview').onclick=()=>{previewRequest++;$('planPreview').close()};$('clearSelection').onclick=()=>{selectedItems.clear();syncSelection()};$('selectAdvice').onclick=()=>{for(const row of adviceRowsVisible)addSelection(row);syncSelection()};$('selectPage').onchange=()=>{for(const row of pageRows){if($('selectPage').checked)addSelection(row);else selectedItems.delete(row.id)}syncSelection()};$('minFileSize').onchange=$('fileType').onchange=()=>{offset=0;load()};
 $('adviceTab').onclick=()=>switchMode('advice');$('adviceGoal').onsubmit=e=>{e.preventDefault();renderGoal()};$('goalSpace').oninput=renderGoal;document.querySelectorAll('[data-advice-filter]').forEach(b=>b.onclick=()=>{adviceFilter=b.dataset.adviceFilter;renderAdvice()});
 $('treeTab').onclick=()=>switchMode('tree');$('filesTab').onclick=()=>switchMode('files');$('metric').onchange=()=>{offset=0;load();loadMap(mode==='files'?rootId:parent)};$('home').onclick=()=>navigate(rootId);
 $('back').onclick=async()=>{if(parent<0||parent===rootId)return navigate(rootId);const row=await api('node',{id:parent});const id=Number(BigInt(row.metadata.parent_reference)&((1n<<48n)-1n));navigate(id===parent?rootId:id)};

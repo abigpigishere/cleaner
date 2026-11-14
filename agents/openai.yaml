@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cleaner"
+  short_description: "Windows NTFS 高速存储分析、清理建议、可视化与已确认文件处理"
+  default_prompt: "使用 $cleaner 分析 C 盘，给出清晰的空间建议并展示可视化，先不删除文件。"

@@ -12,6 +12,8 @@ from viewer_jobs import Controller,drives
 from viewer_shell import open_explorer
 from cleanup_advice import build_advice
 from cleanup_plan import PlanStore,operation_info
+from file_operations import OperationManager
+from installed_apps import inventory,related_apps
 
 
 def main():
@@ -29,6 +31,7 @@ def main():
         if candidate.is_relative_to((Path(__file__).parent/'results').resolve()) and (candidate/'report.json').is_file():
             args.scan_dir=candidate
     controller=Controller(Viewer(args.scan_dir),Viewer)
+    operations=OperationManager(controller)
     assets=Path(__file__).parent/'viewer'
     token=secrets.token_urlsafe(24)
     port=0
@@ -83,11 +86,18 @@ def main():
                 if not 0<length<=262144 or self.headers.get_content_type()!='application/json':
                     return self.send(400,{'error':'Invalid JSON request'})
                 body=json.loads(self.rfile.read(length))
+                if not isinstance(body,dict):raise ValueError('请求必须为 JSON 对象')
                 route,_=match
                 if route=='api/scan':
-                    value=controller.start(body.get('target'))
+                    with operations.lock:
+                        if operations.active:raise ValueError('文件操作正在进行，请等待完成')
+                        value=controller.start(body.get('target'))
                 elif route=='api/pick-folder':
                     value=controller.pick()
+                elif route=='api/operations/prepare':
+                    value=operations.prepare(body)
+                elif route=='api/operations/execute':
+                    value=operations.execute(body)
                 elif route in ('api/plan','api/preview'):
                     with controller.viewer_lock:
                         store=PlanStore(controller.viewer)
@@ -116,6 +126,13 @@ def main():
                     return self.send(200,controller.status())
                 if route=='api/picker-status':
                     return self.send(200,controller.picker)
+                if route=='api/operations/status':
+                    return self.send(200,operations.status(get('ticket','')))
+                if route=='api/apps':
+                    with controller.viewer_lock:
+                        number=int(get('id',str(controller.viewer.root)))
+                        if not controller.viewer.permits(number):raise ValueError('项目不在当前范围内')
+                        return self.send(200,{'apps':related_apps(controller.viewer.path(number))})
                 if route=='api/drives':
                     return self.send(200,{'drives':drives()})
                 with controller.viewer_lock:

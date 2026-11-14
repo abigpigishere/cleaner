@@ -95,6 +95,7 @@ class PlanStore:
     def preview(self,request):
         plan,revision=self.load()
         if request.get('scan_id')!=self.scan_id or request.get('revision')!=revision:raise ValueError('扫描或建议方案已变化，请刷新后重新预览')
+        if not isinstance(request.get('destinations',{}),dict) or not isinstance(request.get('delete_modes',{}),dict):raise ValueError('目标与删除方式必须为 JSON 对象')
         items=request.get('items')
         if not isinstance(items,list) or not 1<=len(items)<=200:raise ValueError('请选择 1 到 200 个项目')
         defaults={i['id']:i for i in plan['items']};rows=[];seen=set()
@@ -107,9 +108,19 @@ class PlanStore:
             reference=hex(self.viewer.fields(row['id'])[0]);row.update(reference=reference,operation=operation,operation_label=OPERATIONS[operation],reason=defaults.get(row['id'],{}).get('reason','手动加入清单，请确认用途'))
             row['notes']=['基于扫描快照；执行前仍需核对文件身份、变化和使用状态。']
             row['estimated_release_bytes']=None
-            if operation=='recycle':row['notes'].append('移入同盘回收站不会立即增加该盘可用空间。');row['estimated_release_bytes']=0
+            if operation=='recycle':
+                mode=request.get('delete_modes',{}).get(str(row['id']),'recycle')
+                if mode not in ('recycle','permanent'):raise ValueError('删除方式无效')
+                row['delete_mode']=mode
+                if mode=='permanent':row['operation_label']='永久删除';row['notes'].append('永久删除不能通过回收站恢复；需要在执行前明确确认。')
+                else:row['notes'].append('移入同盘回收站不会立即增加该盘可用空间。');row['estimated_release_bytes']=0
             elif operation=='review':row['notes'].append('仅查看，不安排空间处理。');row['estimated_release_bytes']=0
-            elif operation=='move':row['notes'].append('尚未指定目标位置；后续需要验证目标容量、复制结果及原件移除。')
+            elif operation=='move':
+                rule=classify(row['path'],row['directory'])
+                row['manual_game_move']=bool(rule and rule['kind']=='move')
+                destination=request.get('destinations',{}).get(str(row['id']),'')
+                if not isinstance(destination,str) or len(destination)>4096:raise ValueError('目标路径无效')
+                row['destination']=destination;row['notes'].append('游戏需要通过对应启动器存储入口迁移，本工具不直接复制安装目录。' if row['manual_game_move'] else '复制并校验成功后才移除原件；不会覆盖已有目标。' if destination else '尚未指定目标位置；准备执行前需填写完整目标路径。')
             elif operation=='uninstall':row['notes'].append('需要通过所属应用或启动器卸载，不直接删除安装目录。')
             elif operation=='cache_cleanup':row['notes'].append('需要通过所属应用确认缓存范围；部分内容可能正在使用或会重新生成。')
             if row['links']>1 and not row['directory']:row['notes'].append('此文件存在硬链接，处理一个路径不保证释放数据簇。')
