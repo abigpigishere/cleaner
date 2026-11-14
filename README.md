@@ -1,123 +1,176 @@
 # Cleaner
 
-仿 WizTree 的 NTFS 磁盘空间查看器。直接读取卷的 MFT 统计每个文件、文件夹的占用，在本地网页里用目录树、文件列表和矩形图（treemap）展示。扫描阶段只读；确认具体清单后，可处理个人文件删除或迁移。软件卸载与游戏迁移通过系统/启动器入口交接。
+**Scan in seconds. See what takes space. Build a clear cleanup plan.**
 
-## 打开前端界面
+Cleaner is an AI-agent skill for Windows disk cleanup, combining fast NTFS scans, interactive treemaps, and reviewable cleanup plans. A native C++ engine reads the Master File Table (MFT); a local browser interface makes the results easy to explore; an agent helps decide what is worth acting on.
 
-**方式一：双击启动**
+![Cleaner directory overview and treemap illustration](docs/assets/treemap-demo.svg)
 
-推荐运行 `python cleaner_cli.py start --open`；没有扫描结果时先运行 `python cleaner_cli.py scan --target C:\`。既有 `results\native-c-v1\打开C盘查看页.cmd` 也可用于查看。
+*Illustration with synthetic data. The current application interface is primarily Chinese.*
 
-**方式二：命令行**
+## Why use Cleaner?
+
+### Get scan results in seconds
+
+Spend your time deciding what to do with your files. Cleaner reads NTFS metadata directly instead of opening every directory and querying every file individually. Its native pipeline parses file records, resolves extension records, aggregates directory sizes, and writes a compact index.
+
+A measured local run indexed **about 1.15 million files and 319,000 directories in 2.68 seconds**, including native index export. See [Performance](#performance) for the timing boundaries.
+
+### See where the space goes
+
+Explore a linked **directory tree, sortable file list, and nested treemap**. Larger items receive larger areas, file types have distinct colors, and hovering reveals a path and size. Click a tile to locate its file or folder; right-click to inspect it in File Explorer.
+
+The viewer also provides file-name search and size/type filters for large archives, installers, videos, and disk images. It uses Canvas 2D and compact binary payloads, with no frontend build step.
+
+### Turn disk usage into a practical plan
+
+Ask for a result, such as:
+
+> Use $cleaner to analyze C: and prepare a plan to reach 30 GiB of free space. Do not delete anything yet.
+
+Cleaner calculates the space gap, surfaces candidates, and lets the agent add reasons, evidence, and appropriate actions. Suggestions appear in the same interface as the scan results, so you can inspect the underlying files before making a decision.
+
+The workflow is **scan and show first, then publish a first plan**. The skill gives the initial analysis an approximately three-minute budget; detailed investigations happen when requested. This is a planning target, not a guaranteed model response time.
+
+### Keep control of each action
+
+Select items across categories and pages, then review a deduplicated processing list. File operations use an explicit confirmation step and one-use execution tickets bound to the scan, plan, and live source identity.
+
+Personal-file moves are verified before the original is removed. Permanent deletion is a separate, explicit choice. Software and managed games use system or launcher workflows rather than deleting installation folders.
+
+### Understand the numbers
+
+Cleaner distinguishes **logical size, allocated space, and NTFS reserved space**. Hard-linked file records are assigned to one canonical parent for physical accounting. Directory totals and treemap weights use the same allocation data.
+
+Candidate size is not a promise of recovered space. The result of an operation is checked against actual free-space changes, and unresolved or unaccounted amounts remain visible rather than being silently assigned to a folder.
+
+### Use it from an agent or a terminal
+
+Cleaner includes a [Codex skill](SKILL.md), a JSON CLI, and versioned plan files. An agent can inspect a compact overview, publish or revise a plan, prepare a selection, and follow confirmed operations without inventing filesystem commands for each task.
+
+Scanning and the viewer run locally. The viewer has no embedded model service; the agent you invoke performs the analysis using the metadata it reads. Scan results and runtime tokens are excluded from Git.
+
+## Performance
+
+One local Windows run on an approximately **200 GiB NTFS volume** produced:
+
+| Measurement | Result |
+| --- | ---: |
+| File records indexed | 1,145,383 files + 319,238 directories |
+| Native results ready | 2.38 s |
+| Native scan including index export | **2.68 s** |
+| Complete scan task, including authorization handling and viewer index loading | 11.86 s |
+| Unresolved file sizes / parser errors in that run | 0 / 0 |
+
+These measurements are from a live local volume and may benefit from the OS cache. They are not a cold-disk benchmark or a guarantee for every machine. Browser rendering, agent reasoning, and file copying have their own costs; they are not included in the native scanner timing.
+
+The scanner's implementation and earlier measurements are documented in [PERFORMANCE.md](PERFORMANCE.md).
+
+## Quick start
+
+### Requirements
+
+- Windows 10/11 with a **local NTFS** target volume.
+- Python 3.12 is the tested runtime, plus NumPy.
+- MSVC C++ Build Tools with C++20 support to compile the native scanner.
+- Administrator approval to read raw NTFS metadata. The elevated reader is reused within a viewer session; file operations do not use that reader's elevated permissions.
+
+From the repository directory:
 
 ```powershell
-python 'E:\桌面\cleaner\view_scan.py' --scan-dir 'E:\桌面\cleaner\results\native-c-v1' --latest --open
+python -m pip install -r requirements.txt
+.\native\build.cmd
+python cleaner_cli.py doctor
+python cleaner_cli.py scan --target 'C:\' --open
 ```
 
-启动后终端会打印一行 JSON，其中 `url` 形如 `http://127.0.0.1:端口/随机令牌/`。如果浏览器没有自动打开，复制这个地址到浏览器即可。
+The scan command opens the local viewer by default. On the first run, the viewer opens as soon as the first scan is available. Later scans can show progress in the already-open interface. Use `--no-open` for a headless invocation.
 
-- 地址只在本机（127.0.0.1）可访问，令牌每次启动都会变，所以旧地址在重启后失效。
-- CLI 启动的服务默认空闲 8 小时后退出；直接运行 view_scan.py 的默认值仍为 30 分钟，可用 --idle-minutes 设置。
-- 关闭服务：在终端按 `Ctrl+C`。
+To reopen the most recent result:
 
-### 启动参数
+```powershell
+python cleaner_cli.py start --open
+```
 
-| 参数 | 作用 |
+The URL uses `127.0.0.1`, a local port, and a random access token. Keep the printed URL for the active session. Services started through the CLI default to an eight-hour idle timeout.
+
+## Install as a Codex skill
+
+Keep the repository on the drive of your choice and link it into your Codex skills directory. The example below assumes the repository is at `E:\Projects\cleaner` and that the destination does not already exist:
+
+```powershell
+New-Item -ItemType Junction `
+  -Path "$env:USERPROFILE\.codex\skills\cleaner" `
+  -Target 'E:\Projects\cleaner'
+```
+
+Then invoke `$cleaner`, for example:
+
+> Use $cleaner to scan C: and show me the largest files and cleanup suggestions.
+
+The repository contains the skill instructions and runtime; scan indexes, plans, and operation logs stay in its ignored `results/` directory.
+
+## What can it do today?
+
+| Capability | Current behavior |
 | --- | --- |
-| `--scan-dir <目录>` | 必填，要打开的扫描结果目录（含 `report.json` 和 `index.bin`） |
-| `--latest` | 改为打开最近一次成功扫描的结果（记录在 `results/latest-view.json`） |
-| `--open` | 启动后自动打开浏览器 |
-| `--url-file <文件>` | 把访问地址写入该文件 |
-| `--idle-minutes <分钟>` | 空闲多久后退出，默认 30 |
+| Disk analysis | Read-only MFT scans of local Windows NTFS volumes |
+| Folder analysis | Scan the containing volume, then show the selected folder's scope |
+| Visualization | Linked directory tree, file list, treemap, and large-file filters |
+| Cleanup plans | Rule-discovered candidates refined by an agent; JSON import/export and live page updates |
+| Personal-file deletion | Recycle Bin or explicitly confirmed permanent deletion |
+| Personal-file moves | Same-volume rename or verified cross-volume copy followed by source removal |
+| Installed software | Read installed-app metadata and hand off to Windows Settings for uninstall |
+| Managed game moves | Hand off to the corresponding launcher workflow |
+| Application caches | Identify candidates and recommend application-specific cleanup; no blanket cache-root deletion |
 
-## 扫描磁盘
+Uninstall and launcher handoffs are reported as **awaiting user action**, not as completed removals. The current scanner does not support non-NTFS volumes or network shares.
 
-1. 在页面左上角选择盘符，或在路径栏输入文件夹，也可点“选择文件夹…”。
-2. 当前服务会话首次点击“开始扫描”时，在 Windows 管理员授权（UAC）窗口中选“是”。随后复用同一个后台读取进程，不再逐次弹窗；关闭或重启服务后需要重新授权。取消授权会保留当前结果。
-3. 底部显示扫描进度，完成后页面自动刷新为新结果。
+## Agent and CLI workflow
 
-扫描结果保存在 `results\ui-jobs\<任务编号>\scan`，每次独立保存，不覆盖旧结果。
-
-## 页面说明
-
-- **顶部卡片**：磁盘已用空间、可用空间、已扫描计入的大小，以及“未计入”（已用减去扫描计入，主要是系统元数据和无法读取的项目）。
-- **目录树 / 文件列表 / 所选项目**：点击文件夹进入，列表可按大小排序、按名称搜索、分页查看。
-- **空间矩形图**：灰色框是文件夹，彩色小块是文件，颜色按扩展名区分，底部图例列出占用最多的扩展名。
-  - 根据矩形面积自动显示目录标题；同扩展名文件有明暗变化，微小文件不绘制分隔边线。
-  - 单击方块进入该文件夹，“上级”返回上一层，“全景”回到根目录。
-  - 右键方块可复制路径或在资源管理器中打开。
-  - 拖动矩形图上方的分隔条可调整高度。
-
-## 环境要求
-
-- Windows，目标卷为 NTFS。
-- Python 3.12，需安装 numpy：`pip install numpy`。
-- 扫描内核 `native\build\cleaner-scan.exe` 已编译好。修改 `native\scanner.cpp` 后需重新编译，要求安装 Visual Studio C++ 工具：
-
-  ```powershell
-  cmd /c "E:\桌面\cleaner\native\build.cmd"
-  ```
-
-## 测试
+Get a compact overview with a free-space target:
 
 ```powershell
-python -m unittest discover -s 'E:\桌面\cleaner' -p 'test_*.py'
-node 'E:\桌面\cleaner\viewer\test_treemap.cjs'
-& 'E:\桌面\cleaner\native\build\cleaner-scan.exe' --self-test
+python cleaner_cli.py overview --goal-free-gib 30
 ```
 
-## 更多文档
+The response includes the space gap, candidate identities, allowed actions, major allocations, and the first-plan analysis deadline. It reads the existing index rather than rescanning the drive.
 
-- [VIEWER.md](VIEWER.md)：查看页与扫描任务的实现细节、安全措施
-- [SIZES.md](SIZES.md)：文件大小的计算方式
-- [BULK.md](BULK.md)、[READING.md](READING.md)、[PERFORMANCE.md](PERFORMANCE.md)：MFT 读取与性能记录
+Plans and execution previews are separate:
 
-## 计量验证（2026-11-14）
+```text
+Scan → visualize → publish a plan → select items → preview → confirm → act → verify
+```
 
-修复了较早的 MFT 扩展记录被提前清空的问题；C 盘未解析项从 9,112 降至 5，并补齐仅含命名流和索引的内部文件后降至 0。磁盘占用按所有非驻留属性的实际映射簇计量，包括未命名/命名 DATA、目录索引、位图和属性列表；逻辑大小仍表示未命名 DATA 长度。驻留数据已包含在 MFT 自身空间中，不重复占用簇。
+- [SKILL.md](SKILL.md): invocation, fast first-pass behavior, and decision criteria.
+- [Plan schema](references/plan-schema.md): identity-bound agent recommendations.
+- [Operation protocol](references/operations.md): previews, confirmation tickets, execution, and results.
 
-`results/accuracy-audit.json` 保存逐级目录合计（含目录自身分配）、图块权重和 20 个大文件的 Windows 接口对照结果。硬链接按单个规范父目录去重归属，不能与资源管理器沿所有硬链接路径重复累计的大小直接比较。实时扫描不是快照。卷已用空间与已归属分配簇仍有差额时如实保留，未测明来源前不强行分摊到用户目录。
+## Data integrity and accounting
 
-管理员读取进程通过带随机密钥的本机命名管道接收固定扫描请求；不接受任意命令。进程随着当前查看服务退出而结束，没有安装系统服务或修改 UAC 设置。
+- Scanning does not change source files. Reports are written under `results/`.
+- Cross-volume file copies preserve and verify named NTFS data streams as well as the main stream. Changed or actively written sources are not forcibly removed.
+- Existing destinations are not overwritten. Links, whole Git projects/worktrees, system locations, and the running environment are excluded from generic file handling.
+- Generic directory handling currently rejects directories with named data streams instead of silently dropping that data.
+- Moving files into the same drive's Recycle Bin does not immediately free that space. Same-volume moves also do not increase the drive's free space.
+- Hard-link attribution can make individual directory totals differ from tools that count every path separately. The scan is live metadata, not a point-in-time snapshot.
+- After confirmed file changes, rescan to refresh the tree and check the actual free-space target.
 
-### 卷预留空间显示
+## Development
 
-有卷审计数据时，顶部空间卡片统一采用本次扫描的统计时点。NTFS 预留簇单列为“NTFS 预留空间”，不再算入“未计入”。扣除预留后不超过 1 MiB 的微小差额不显示卡片；原始审计数值仍完整保存在 report.json。超过阈值的差额仍显示，旧报告缺少审计数据时提示重新扫描，不猜测预留值。
-
-## 当前 Git 基线
-
-此版本作为后续 skill 化的开发基线：只读 NTFS 高速扫描、一次管理员授权的会话复用、目录与文件列表联动、按实际分配簇绘制的矩形图，以及独立列出的 NTFS 预留空间。矩形图采用已确认的深色配色和左上到右下的柔和侧光，不使用中央高光。
-
-扫描结果、访问令牌、个人磁盘路径清单、测试生成文件和编译产物不纳入 Git。首次克隆后需重新编译 `native/build.cmd` 并执行一次扫描生成 `results`；项目根目录的 SKILL.md 已封装为 cleaner skill，可通过目录链接接入 Codex。
-
-## 清理建议（只读）
-
-“清理建议”页签基于当前扫描识别缓存、临时文件、下载目录、大型个人文件和软件/游戏安装目录。每条建议显示实际占用、原因、处理方式，并可定位目录或在资源管理器中查看。支持按类别筛选、输入可用空间目标查看缺口；占用量不等于可释放量；建议不会自行执行，不根据文件名推断长期未使用。重叠目录去重，候选数按类别限制，避免小缓存淹没大型软件建议。
-
-## 建议方案与处理预览
-
-- “清理建议”和文件列表支持勾选，选择在切换类别、翻页和查看目录时保留；重新扫描会清空旧选择。
-- “大文件分析”支持大小门槛、程序/安装包、压缩包、视频、镜像/虚拟磁盘及名称的组合筛选。
-- 点击“预览处理清单”核对每项计划方式，目录重叠去重、回收站不立即释放空间、软件应通过管理工具处理等信息会明确展示。预览保存在该次扫描目录的 `preview.json`，预览本身不会执行。准备具体执行清单后还需确认，才进入文件操作接口。
-- 每次扫描的建议方案保存在 `plan.json`。GET `api/plan` 导出方案；同源且携带令牌的 POST `api/plan` 导入 agent 方案；POST `api/preview` 生成只读清单。所有记录号、文件引用、扫描身份与处理方式都会校验，拒绝任意命令字段。修改方案后点击“重新载入建议”。
-
-agent 也可使用本地 CLI（仅写结果目录）：
+Node.js is needed only for the JavaScript tests, not to run the viewer.
 
 ```powershell
-python plan_tool.py --scan-dir '<扫描结果目录>'
-python plan_tool.py --scan-dir '<扫描结果目录>' --import-plan '<建议 JSON 文件>'
+python -m unittest discover -s . -p 'test_*.py'
+node viewer/test_treemap.cjs
+node viewer/test_live_workflow.cjs
+.\native\build\cleaner-scan.exe --self-test
 ```
 
-建议格式：`schema_version: 1`、`scan_id`、`items`。每项包含 `id`、完整 `reference`、`operation`、`reason`、`evidence`。先导出本次方案取得身份和记录引用，再修改理由与允许的处理方式；不能填写任意路径或脚本替代记录号。
+File-operation tests create their own temporary fixtures. Set `CLEANER_TEST_ROOT` to choose their test directory; use a location outside the repository and application-managed data directories.
 
-## 文件操作与 Skill
+More implementation notes: [VIEWER.md](VIEWER.md), [SIZES.md](SIZES.md), [BULK.md](BULK.md), and [READING.md](READING.md). Some engineering notes are currently in Chinese.
 
-- `SKILL.md` 是技能入口，`cleaner_cli.py` 是 agent JSON 接口；安装路径可链接到本项目，程序和结果保持在 E 盘。
-- 文件操作使用一次性确认票据，绑定扫描、方案、源文件身份和实时清单；执行前复核整个批次。文件写入中的项、链接、项目整体、系统/应用托管数据及运行环境不强制处理。
-- 个人文件可移回收站或明确确认永久删除；跨盘迁移用 Windows 原生复制保留文件数据流，逐流 SHA-256 校验后锁定并核对原件再移除。不覆盖已有目标。目录命名流暂不由通用目录处理器处理。
-- 卸载读取 Windows 安装元数据并打开系统设置，游戏迁移打开启动器入口；这两个交接状态是 `awaiting_user`，并非自动卸载/迁移完成。通用应用缓存仍通过所属应用处理。
-- 真机自有文件验证覆盖永久删除、回收站实际副本、单文件和目录 C→E 迁移；不卸载真实软件。结果在忽略的 results/operation-verification.json 中。
+## Inspiration
 
-设计参考：[storage-analyzer SKILL.md](https://github.com/KKKKhazix/khazix-skills/blob/main/storage-analyzer/SKILL.md) 的分析分级、具体处置与结果复核思路；Cleaner 的 MFT 扫描器、交互式矩形图及执行校验为本项目实现。
-
-文件操作测试只使用临时生成的自有文件，默认在 Documents/CleanerTests 下创建并回收临时子目录；可设置 CLEANER_TEST_ROOT 指定工作区内的测试根目录（须在应用托管目录及 Cleaner 源码目录之外）。
+Cleaner's visual exploration is inspired by disk analyzers such as [WizTree](https://www.diskanalyzer.com/). Its analysis-to-action workflow also draws on the [storage-analyzer skill](https://github.com/KKKKhazix/khazix-skills/blob/main/storage-analyzer/SKILL.md). Cleaner combines these ideas with its own native scan pipeline, agent-facing plans, and local file-operation checks.

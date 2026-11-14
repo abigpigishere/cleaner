@@ -1,5 +1,6 @@
 """Cleaner agent entry point. JSON interface to the local scanner, plans and confirmed operations."""
 import argparse,ctypes,json,os,re,subprocess,sys,time,urllib.parse,urllib.request,uuid,webbrowser
+from datetime import datetime,timezone,timedelta
 from pathlib import Path
 ROOT=Path(__file__).resolve().parent
 URL_FILE=ROOT/'results/running-viewer.json'
@@ -11,7 +12,7 @@ def address():
     if p.scheme!='http' or p.hostname!='127.0.0.1' or not p.port or not re.fullmatch(r'/[A-Za-z0-9_-]{24,}/',p.path):raise ValueError('本地服务地址无效')
     return value
 
-def call(endpoint,body=None,query=None):
+def call(endpoint,body=None,query=None,timeout=15):
     if not re.fullmatch(r'api/[a-z/-]+',endpoint):raise ValueError('接口路径无效')
     url=address();parts=urllib.parse.urlsplit(url)
     target=url+endpoint+('?' +urllib.parse.urlencode(query) if query else '')
@@ -20,7 +21,7 @@ def call(endpoint,body=None,query=None):
     request=urllib.request.Request(target,data=json.dumps(body).encode() if body is not None else None,headers=headers)
     opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with opener.open(request,timeout=120) as response:return json.load(response)
+        with opener.open(request,timeout=timeout) as response:return json.load(response)
     except urllib.error.HTTPError as error:
         try:message=json.load(error).get('error',str(error))
         except Exception:message=str(error)
@@ -68,9 +69,10 @@ def first_scan(target):
 def main():
     p=argparse.ArgumentParser(description=__doc__);sub=p.add_subparsers(dest='command',required=True)
     sub.add_parser('doctor');st=sub.add_parser('start');st.add_argument('--open',action='store_true')
-    sc=sub.add_parser('scan');sc.add_argument('--target',required=True);sc.add_argument('--no-wait',action='store_true');sc.add_argument('--open',action='store_true')
+    sc=sub.add_parser('scan');sc.add_argument('--target',required=True);sc.add_argument('--no-wait',action='store_true');sc.add_argument('--open',action='store_true',default=True);sc.add_argument('--no-open',dest='open',action='store_false')
     sub.add_parser('status')
-    c=sub.add_parser('call');c.add_argument('endpoint');c.add_argument('--body-file',type=Path);c.add_argument('--query',default='{}')
+    overview=sub.add_parser('overview');overview.add_argument('--goal-free-gib',type=float)
+    c=sub.add_parser('call');c.add_argument('endpoint');c.add_argument('--body-file',type=Path);c.add_argument('--query',default='{}');c.add_argument('--timeout',type=float,default=15)
     a=p.parse_args()
     if a.command=='doctor':
         import numpy
@@ -88,6 +90,19 @@ def main():
         output({**state,'url':address()})
         if state['status']!='done':raise SystemExit(1)
         return
+    if a.command=='overview':
+        if a.goal_free_gib is not None and not 0<a.goal_free_gib<1000000:raise ValueError('空间目标无效')
+        start();started=datetime.now(timezone.utc);meta=call('api/meta');advice=call('api/advice');plan=call('api/plan')
+        references={i['id']:i['reference'] for i in plan['items']}
+        candidates=[{**{k:r[k] for k in ('id','name','path','allocated','kind','operation','allowed_operations')},'reference':references[r['id']]} for r in advice['rows']]
+        top=call('api/list',query={'mode':'tree','parent':meta['root']['id'],'limit':8})['rows']
+        files=call('api/list',query={'mode':'files','min_bytes':524288000,'limit':8})['rows']
+        compact=lambda rows:[{k:r[k] for k in ('id','name','path','allocated','directory')} for r in rows]
+        output({'url':address(),'scan_id':plan['scan_id'],'plan_id':plan['plan_id'],'schema_version':1,
+                'analysis_started_utc':started.isoformat(),'analysis_deadline_utc':(started+timedelta(seconds=180)).isoformat(),
+                'goal_free_gib':a.goal_free_gib,'free_bytes':meta['disk']['free'],'needed_bytes':max(0,int(a.goal_free_gib*2**30)-meta['disk']['free']) if a.goal_free_gib is not None else None,
+                'native_scan_seconds':meta['report'].get('total_seconds'),'sizes_unresolved':meta['report'].get('sizes_unresolved'),
+                'candidates':candidates,'top_directories':compact(top),'large_files':compact(files)});return
     if a.command=='status':start();output({'scan':call('api/scan-status'),'meta':call('api/meta')});return
     if a.command=='call':
         start();body=None
@@ -96,7 +111,8 @@ def main():
             body=json.loads(a.body_file.read_text(encoding='utf-8-sig'))
         query=json.loads(a.query)
         if not isinstance(query,dict):raise ValueError('query 必须为 JSON 对象')
-        output(call(a.endpoint,body,query))
+        if not 1<=a.timeout<=120:raise ValueError('timeout 必须在 1 到 120 秒之间')
+        output(call(a.endpoint,body,query,timeout=a.timeout))
 if __name__=='__main__':
     try:main()
     except Exception as error:output({'error':str(error)});raise SystemExit(1)

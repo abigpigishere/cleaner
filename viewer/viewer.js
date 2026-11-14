@@ -204,7 +204,8 @@ function renderStats(r,scope){
 function scanControls(value){scanning=value;for(const id of ['startScan','pickFolder','driveSelect','targetPath'])$(id).disabled=value;$('startScan').textContent=value?'扫描中…':'开始扫描'}
 const phases={permission:'等待 Windows 管理员授权',bootstrapping:'读取卷信息',initializing:'初始化扫描',scanning:'读取并解析文件记录',merging:'整理名称与数据流',aggregating:'汇总目录大小',saving:'保存扫描索引',preparing:'载入新目录树与文件列表',done:'扫描完成',error:'扫描未完成'};
 async function pollScan(){
- try{const job=await api('scan-status');if(job.status==='idle')return;
+ clearTimeout(pollTimer);
+ try{const job=await api('scan-status');if(job.status==='idle'){pollTimer=setTimeout(pollScan,1500);return}
  const active=!['done','error','cancelled'].includes(job.status);scanControls(active);
  $('scanPhase').textContent=phases[job.phase]||job.phase;$('scanElapsed').textContent='总用时 '+(job.elapsed_seconds||0).toFixed(2)+'s';
  if(job.percent==null)$('scanProgress').removeAttribute('value');else $('scanProgress').value=Math.min(100,job.percent);
@@ -212,8 +213,23 @@ async function pollScan(){
  if(job.phase==='preparing')$('scanRecords').textContent='卷扫描已结束，正在准备浏览索引；完成后自动刷新。';
  if(job.status==='done'){$('scanRecords').textContent='已更新目录树和文件列表 · '+job.target;if(!meta||job.generation!==meta.generation)await init();clearStatus()}
  else if(job.status==='error'||job.status==='cancelled'){$('scanPhase').textContent=job.status==='cancelled'?'已取消授权':'扫描失败，保留原结果';$('scanRecords').textContent=job.error||'请重试';status(job.error||'扫描未完成')}
- if(active)pollTimer=setTimeout(pollScan,160);
- }catch(error){scanControls(false);status(error.message)}
+ pollTimer=setTimeout(pollScan,active?160:1500);
+ }catch(error){scanControls(false);status(error.message);pollTimer=setTimeout(pollScan,2000)}
+}
+let watchedPlanScan=null,watchedPlanRevision=null;
+async function watchPlan(){
+ try{
+  if(!meta||scanning||document.hidden)return;
+  const state=await api('plan-status');
+  const changed=state.scan_id!==watchedPlanScan||state.revision!==watchedPlanRevision;
+  watchedPlanScan=state.scan_id;watchedPlanRevision=state.revision;
+  if(!changed||!state.revision)return;
+  adviceData=null;
+  if(mode==='advice'){const scroll=$('advicePanel').scrollTop;await loadAdvice();$('advicePanel').scrollTop=scroll;$('adviceTab').textContent='清理建议'}
+  else if(state.source==='agent'&&mode==='tree'&&parent===rootId&&selected==null&&!$('planPreview').open){adviceFilter='all';await switchMode('advice');$('adviceTab').textContent='清理建议'}
+  else $('adviceTab').textContent='清理建议 · 更新';
+ }catch{/* Retry quietly; scan/service status is handled by pollScan. */}
+ finally{setTimeout(watchPlan,2000)}
 }
 async function startScan(){if(scanning)return;const target=$('targetPath').value.trim();try{scanControls(true);$('scanPhase').textContent='提交只读扫描请求';$('scanProgress').removeAttribute('value');$('scanElapsed').textContent='总用时 0.00s';$('scanRecords').textContent='如弹出 Windows 管理员授权，请确认后继续。';await api('scan',{}, {target});await pollScan()}catch(e){scanControls(false);status(e.message);$('scanPhase').textContent='未开始扫描';$('scanRecords').textContent=e.message;$('scanProgress').value=0}}
 async function pickFolder(){try{$('pickFolder').disabled=true;await api('pick-folder',{},{});$('scanPhase').textContent='请在系统窗口选择文件夹';const check=async()=>{try{const state=await api('picker-status');if(state.status==='waiting')return setTimeout(check,300);$('pickFolder').disabled=scanning;if(state.path){$('targetPath').value=state.path;$('driveSelect').value=state.path.slice(0,2).toUpperCase()+'\\';$('scanPhase').textContent='文件夹已选择，点击开始扫描';$('scanRecords').textContent='文件夹模式会扫描所在卷，再显示所选目录范围。'}else if(state.error)status(state.error);else $('scanPhase').textContent='已取消选择'}catch(e){$('pickFolder').disabled=scanning;status(e.message)}};check()}catch(e){$('pickFolder').disabled=scanning;status(e.message)}}
@@ -232,4 +248,4 @@ function mapLegend(){const box=$('mapLegend');box.replaceChildren();for(const {l
 $('mapReset').onclick=()=>navigate(rootId);$('mapUp').onclick=async()=>{if(mapRootId===rootId)return;const row=await api('node',{id:mapRootId});navigate(Number(BigInt(row.metadata.parent_reference)&((1n<<48n)-1n)))};
 document.addEventListener('pointerdown',event=>{if(!$('contextMenu').contains(event.target))hideContext()});document.addEventListener('keydown',event=>{if(event.key==='Escape'){hideContext();mapView.hideTooltip()}});document.querySelector('.data-deck').addEventListener('scroll',hideContext,true);
 const grip=$('mapResizer');let resizeStart=null;grip.onpointerdown=e=>{resizeStart={y:e.clientY,height:$('mapPanel').getBoundingClientRect().height};grip.setPointerCapture(e.pointerId);e.preventDefault()};function mapHeight(height){const max=Math.max(140,$('dataDeck').clientHeight-165);const value=Math.max(140,Math.min(height,max));$('mapPanel').style.height=value+'px';grip.setAttribute('aria-valuenow',Math.round(value))}grip.onpointermove=e=>{if(resizeStart)mapHeight(resizeStart.height+resizeStart.y-e.clientY)};grip.onpointerup=()=>resizeStart=null;grip.onpointercancel=()=>resizeStart=null;grip.onkeydown=e=>{if(e.key==='ArrowUp'||e.key==='ArrowDown'){e.preventDefault();mapHeight($('mapPanel').getBoundingClientRect().height+(e.key==='ArrowUp'?20:-20))}};
-(async()=>{try{const data=await api('drives');for(const drive of data.drives){const option=el('option',drive.drive+' · '+drive.filesystem);option.value=drive.drive;option.disabled=!drive.supported;$('driveSelect').append(option)}await init();await pollScan()}catch(e){status(e.message)}})();
+(async()=>{try{const data=await api('drives');for(const drive of data.drives){const option=el('option',drive.drive+' · '+drive.filesystem);option.value=drive.drive;option.disabled=!drive.supported;$('driveSelect').append(option)}await init();await pollScan();watchPlan()}catch(e){status(e.message)}})();

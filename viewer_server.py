@@ -145,6 +145,11 @@ def main():
                     elif route=='api/advice':
                         value=PlanStore(viewer).response()
                         value['rows']=value.pop('items')
+                    elif route=='api/plan-status':
+                        store=PlanStore(viewer)
+                        if store.path.exists():
+                            plan,revision=store.load();value={'scan_id':store.scan_id,'revision':revision,'source':plan['source'],'count':len(plan['items'])}
+                        else:value={'scan_id':store.scan_id,'revision':None,'source':None,'count':0}
                     elif route=='api/plan':
                         store=PlanStore(viewer);value=store.load()[0]
                     elif route=='api/preview':
