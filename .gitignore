@@ -1,0 +1,22 @@
+# Local disk metadata, reports and runtime secrets
+/results/
+/size-check-*/
+
+# Python cache and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Rebuild native binaries locally
+/native/build/
+*.obj
+*.pdb
+*.ilk
+
+# Editor and OS artifacts
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
