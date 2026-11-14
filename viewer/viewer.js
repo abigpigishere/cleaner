@@ -10,16 +10,94 @@ async function api(route,params={},body){
 }
 async function apiBuffer(route,params){const url=new URL('api/'+route,base);Object.entries(params).forEach(([k,v])=>url.searchParams.set(k,v));const response=await fetch(url,{cache:'no-store'});if(!response.ok)throw new Error((await response.json()).error||'本地服务无法完成请求');return response.arrayBuffer()}
 function metric(){return $('metric').value}function setBusy(value){busy=value;$('prev').disabled=value||offset===0;$('next').disabled=value||offset+pageSize>=total}
-async function switchMode(next){mode=next;offset=0;$('treeTab').classList.toggle('active',mode==='tree');$('filesTab').classList.toggle('active',mode==='files');$('searchForm').classList.toggle('hidden',mode!=='files');$('back').disabled=mode!=='tree'||parent===rootId;await Promise.all([load(),loadMap(mode==='files'?rootId:parent)])}
+let adviceData=null,adviceFilter='all',selectedItems=new Map(),pageRows=[],adviceRowsVisible=[],previewRequest=0;
+function applyMode(){
+ $('treeTab').classList.toggle('active',mode==='tree');$('filesTab').classList.toggle('active',mode==='files');$('adviceTab').classList.toggle('active',mode==='advice');
+ $('advicePanel').classList.toggle('hidden',mode!=='advice');
+ for(const selector of ['.content > .location','.content > .table-wrap','.content > .pagination'])document.querySelector(selector).classList.toggle('hidden',mode==='advice');
+ $('searchForm').classList.toggle('hidden',mode!=='files');$('metric').disabled=mode==='advice';$('back').disabled=mode!=='tree'||parent===rootId;
+}
+async function switchMode(next){mode=next;offset=0;applyMode();if(mode==='advice'){requestId++;clearStatus();await Promise.all([loadAdvice(),loadMap(rootId)]);return}await Promise.all([load(),loadMap(mode==='files'?rootId:parent)])}
+function renderGoal(){
+ const input=$('goalSpace'),target=Number(input.value)*1073741824,free=meta?.disk?.free;
+ if(!(target>0)||!Number.isFinite(target)||free==null){$('goalSummary').textContent='输入目标后查看空间缺口';return}
+ $('goalSummary').textContent='当前可用 '+fmt(free)+' · '+(free>=target?'已达到目标':'还需释放 '+fmt(target-free));
+}
+async function loadAdvice(){
+ const generation=meta.generation;
+ if(adviceData?.generation===generation){renderAdvice();return}
+ $('adviceRows').replaceChildren(el('div','正在从本次扫描中整理候选项目…','advice-empty'));
+ try{const data=await api('advice');$('exportPlan').href=new URL('api/plan',base).href;if(meta.generation!==generation)return;adviceData={...data,generation};if(mode==='advice')renderAdvice()}
+ catch(error){if(mode==='advice')$('adviceRows').replaceChildren(el('div','无法读取建议：'+error.message,'advice-empty'))}
+}
+function renderAdvice(){
+ if(!adviceData)return;renderGoal();
+ $('adviceSummary').textContent=num(adviceData.candidate_count)+' 个候选 · 合计占用 '+fmt(adviceData.candidate_bytes)+'；这是占用量，不代表可以全部删除或等额释放。';
+ const rows=adviceData.rows.filter(r=>adviceFilter==='all'||(adviceFilter==='apps'?['app','move'].includes(r.kind):r.kind===adviceFilter));
+ adviceRowsVisible=rows;const box=$('adviceRows');box.replaceChildren();
+ document.querySelectorAll('[data-advice-filter]').forEach(b=>b.classList.toggle('active',b.dataset.adviceFilter===adviceFilter));
+ if(!rows.length){box.append(el('div','此类别没有识别到合适的候选项目。可以切换类别，或通过目录树继续查看。','advice-empty'));return}
+ for(const row of rows){
+  const card=el('article',null,'advice-card'),heading=el('div',null,'advice-card-heading'),name=el('div',null,'advice-name');
+  name.append(pickBox(row),icon(row.directory),el('b',row.name));heading.append(name,el('strong',(row.unknown?'至少 ':'')+fmt(row.allocated),'advice-size'));
+  const path=el('div',row.path,'advice-path');path.title=row.path;
+  const tag=el('span',row.label,'advice-tag '+row.kind),reason=el('p',row.reason,'advice-reason'),action=el('p',row.action,'advice-action');
+  const actions=el('div',null,'advice-card-actions'),locate=el('button','定位查看'),open=el('button','在资源管理器中查看');
+  locate.type=open.type='button';locate.onclick=()=>row.directory?navigate(row.id):revealFile(row.id);open.onclick=()=>explorer(row);
+  actions.append(locate,open);card.append(heading,path,tag,reason,action,actions);card.onclick=e=>{if(!e.target.closest('button,input,label,select,a'))select(row.id)};box.append(card);
+ }
+}
+function pickBox(row){
+ const checkbox=el('input');checkbox.type='checkbox';checkbox.className='item-pick';checkbox.dataset.pickId=row.id;checkbox.checked=selectedItems.has(row.id);checkbox.setAttribute('aria-label','加入清单 '+row.name);
+ checkbox.onclick=e=>e.stopPropagation();checkbox.onchange=()=>{if(checkbox.checked)addSelection(row);else selectedItems.delete(row.id);syncSelection()};return checkbox;
+}
+function addSelection(row){
+ if(selectedItems.size>=200&&!selectedItems.has(row.id)){status('一次最多预览 200 项，请分批选择。');return}
+ if(!selectedItems.has(row.id))selectedItems.set(row.id,{row,operation:row.operation||row.suggested_operation||'review'});
+}
+function selectionOccupied(){
+ const paths=[];let bytes=0;
+ for(const {row} of [...selectedItems.values()].sort((a,b)=>a.row.path.length-b.row.path.length)){
+  const p=row.path.replace(/\\+$/,'').toLowerCase();if(paths.some(q=>p===q||p.startsWith(q+'\\')))continue;paths.push(p);bytes+=row.allocated||0;
+ }return bytes;
+}
+function syncSelection(){
+ document.querySelectorAll('[data-pick-id]').forEach(c=>c.checked=selectedItems.has(Number(c.dataset.pickId)));
+ $('selectionSummary').textContent=selectedItems.size?'已选 '+num(selectedItems.size)+' 项 · 去重占用 '+fmt(selectionOccupied()):'尚未勾选项目';
+ $('previewSelection').disabled=!selectedItems.size;$('clearSelection').disabled=!selectedItems.size;
+ const count=pageRows.filter(r=>selectedItems.has(r.id)).length;$('selectPage').checked=!!pageRows.length&&count===pageRows.length;$('selectPage').indeterminate=count>0&&count<pageRows.length;
+}
+async function previewSelection(){
+ if(!selectedItems.size)return;
+ const request=++previewRequest;const dialog=$('planPreview');if(!dialog.open)dialog.showModal();
+ $('previewRows').replaceChildren(el('div','正在核对本次扫描和处理方式…','advice-empty'));$('previewSaved').textContent='';$('downloadPreview').classList.add('hidden');
+ try{
+  if(adviceData?.generation!==meta.generation)await loadAdvice();
+  const data=await api('preview',{}, {scan_id:adviceData.scan_id,revision:adviceData.revision,items:[...selectedItems].map(([id,v])=>({id,operation:v.operation}))});
+  if(request!==previewRequest)return;
+  $('previewSummary').textContent='已选 '+num(data.selected_count)+' 项 · 去重占用 '+fmt(data.occupied_bytes)+(data.covered_count?' · '+num(data.covered_count)+' 项包含在父目录中':'')+'。可释放量需在后续执行后核实。';
+  const rows=$('previewRows');rows.replaceChildren();
+  for(const item of data.items){
+   const card=el('article',null,'preview-item'),heading=el('div',null,'advice-card-heading');heading.append(el('b',item.name),el('strong',fmt(item.allocated),'advice-size'));
+   const path=el('div',item.path,'advice-path'),label=el('label',null,'preview-operation'),operation=el('select');operation.setAttribute('aria-label','处理方式 '+item.name);
+   for(const code of item.allowed_operations){const option=el('option',adviceData.operation_labels[code]||code);option.value=code;operation.append(option)}operation.value=item.operation;
+   operation.onchange=()=>{const entry=selectedItems.get(item.id);if(entry)entry.operation=operation.value;previewSelection()};label.append(el('span','计划方式'),operation);
+   card.append(heading,path,label,el('p',item.reason,'advice-reason'));if(item.covered_by!=null)card.append(el('p','占用已计入所选父目录，不重复相加。','preview-covered'));
+   for(const note of item.notes)card.append(el('p',note,'preview-note'));
+   if(item.estimated_release_bytes===0)card.append(el('p','此方式预计立即释放：0 B','preview-note'));rows.append(card);
+  }
+  $('previewSaved').textContent='只读清单已保存，未执行文件操作。';$('downloadPreview').href=new URL('api/preview',base).href;$('downloadPreview').classList.remove('hidden');
+ }catch(error){if(request===previewRequest){$('previewSummary').textContent='无法生成预览';$('previewRows').replaceChildren(el('div',error.message,'advice-empty'))}}
+}
 async function navigate(id){
- parent=id;mode='tree';offset=0;selected=null;$('treeTab').classList.add('active');$('filesTab').classList.remove('active');$('searchForm').classList.add('hidden');$('back').disabled=id===rootId;$('rows').parentElement.parentElement.scrollTop=0;
+ parent=id;mode='tree';offset=0;selected=null;applyMode();$('treeTab').classList.add('active');$('filesTab').classList.remove('active');$('searchForm').classList.add('hidden');$('back').disabled=id===rootId;$('rows').parentElement.parentElement.scrollTop=0;
  const row=await api('node',{id});if(parent!==id)return;$('location').textContent=row.path;showDetail(row);
  await Promise.all([load(),loadMap(id),revealTree(id)]);
 }
-async function load(){const rid=++requestId;setBusy(true);status(mode==='files'&&query?'正在搜索全部已索引文件名…':'正在读取已有索引…');try{const [data,owner]=await Promise.all([api('list',{mode,parent,metric:metric(),query:mode==='files'?query:'',offset,limit:pageSize}),mode==='files'?meta.root:api('node',{id:parent})]);if(rid!==requestId)return;total=data.total;renderRows(data.rows,owner[metric()]);$('pageInfo').textContent=(total?num(offset+1)+'–'+num(Math.min(offset+pageSize,total)):'0')+' / '+num(total)+' 项 · 查询 '+data.query_seconds.toFixed(3)+'s';$('location').textContent=mode==='files'?(query?'全部文件 · 名称包含 “'+query+'”':'全部可关联文件 · 大小降序'):owner.path;setBusy(false);clearStatus();if(selected!=null){const row=$('rows').querySelector('[data-id="'+selected+'"]');row?.scrollIntoView({block:'nearest'})}}catch(error){if(rid!==requestId)return;setBusy(false);status(error.message)}}
+async function load(){const rid=++requestId;setBusy(true);status(mode==='files'&&query?'正在搜索全部已索引文件名…':'正在读取已有索引…');try{const [data,owner]=await Promise.all([api('list',{mode,parent,metric:metric(),query:mode==='files'?query:'',offset,limit:pageSize,min_bytes:mode==='files'?Number($('minFileSize').value)*1048576:0,type:mode==='files'?$('fileType').value:'all'}),mode==='files'?meta.root:api('node',{id:parent})]);if(rid!==requestId)return;total=data.total;renderRows(data.rows,owner[metric()]);$('pageInfo').textContent=(total?num(offset+1)+'–'+num(Math.min(offset+pageSize,total)):'0')+' / '+num(total)+' 项 · 查询 '+data.query_seconds.toFixed(3)+'s';$('location').textContent=mode==='files'?(query?'全部文件 · 名称包含 “'+query+'”':'全部可关联文件 · 大小降序'):owner.path;setBusy(false);clearStatus();if(selected!=null){const row=$('rows').querySelector('[data-id="'+selected+'"]');row?.scrollIntoView({block:'nearest'})}}catch(error){if(rid!==requestId)return;setBusy(false);status(error.message)}}
 function icon(directory){return el('span',null,'icon '+(directory?'folder':'file'))}
-function renderRows(rows,whole){$('rows').replaceChildren();$('empty').classList.toggle('hidden',rows.length>0);$('empty').textContent=mode==='files'?'没有符合文件名的结果。':'此目录没有已关联的子项。';for(const row of rows){const tr=el('tr');tr.dataset.id=row.id;tr.tabIndex=0;if(row.id===selected)tr.className='selected';const name=el('td'),wrap=el('div',null,'file-name');wrap.append(icon(row.directory),el('strong',row.name));name.append(wrap);if(mode==='files')name.append(el('span',row.path,'file-sub'));const ratio=whole>0&&row[metric()]>0?row[metric()]/whole:0,share=el('td',null,'share-cell'),meter=el('div',null,'share'),fill=el('i');fill.style.width=Math.min(100,ratio*100)+'%';meter.append(fill);share.append(meter,el('span',ratio?(ratio<.001?'<0.1%':(ratio*100).toFixed(1)+'%'):'—','number'));
- tr.append(name,share,el('td',fmt(row.logical),'number'),el('td',fmt(row.allocated),'number'));const state=el('td');state.append(el('span',row.unknown?(row.directory?num(row.unknown)+' 项未知':'待解析'):row.directory?'目录':'已解析','badge'+(row.unknown?' unknown':'')));tr.append(state);tr.addEventListener('click',()=>select(row.id));tr.addEventListener('dblclick',()=>row.directory?navigate(row.id):explorer(row));tr.addEventListener('contextmenu',e=>{e.preventDefault();select(row.id);contextMenu(row,e)});tr.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();row.directory?navigate(row.id):select(row.id)}if(e.key==='F10'&&e.shiftKey){e.preventDefault();contextMenu(row,null,tr)}};name.title=row.path;$('rows').append(tr)}}
+function renderRows(rows,whole){pageRows=rows;$('rows').replaceChildren();$('empty').classList.toggle('hidden',rows.length>0);$('empty').textContent=mode==='files'?'没有符合文件名的结果。':'此目录没有已关联的子项。';for(const row of rows){const tr=el('tr');tr.dataset.id=row.id;tr.tabIndex=0;if(row.id===selected)tr.className='selected';const name=el('td'),wrap=el('div',null,'file-name');wrap.append(icon(row.directory),el('strong',row.name));name.append(wrap);if(mode==='files')name.append(el('span',row.path,'file-sub'));const ratio=whole>0&&row[metric()]>0?row[metric()]/whole:0,share=el('td',null,'share-cell'),meter=el('div',null,'share'),fill=el('i');fill.style.width=Math.min(100,ratio*100)+'%';meter.append(fill);share.append(meter,el('span',ratio?(ratio<.001?'<0.1%':(ratio*100).toFixed(1)+'%'):'—','number'));
+ const pick=el('td',null,'pick-column');pick.append(pickBox(row));tr.append(pick,name,share,el('td',fmt(row.logical),'number'),el('td',fmt(row.allocated),'number'));const state=el('td');state.append(el('span',row.unknown?(row.directory?num(row.unknown)+' 项未知':'待解析'):row.directory?'目录':'已解析','badge'+(row.unknown?' unknown':'')));tr.append(state);tr.addEventListener('click',e=>{if(!e.target.closest('input'))select(row.id)});tr.addEventListener('dblclick',()=>row.directory?navigate(row.id):explorer(row));tr.addEventListener('contextmenu',e=>{e.preventDefault();select(row.id);contextMenu(row,e)});tr.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();row.directory?navigate(row.id):select(row.id)}if(e.key==='F10'&&e.shiftKey){e.preventDefault();contextMenu(row,null,tr)}};name.title=row.path;$('rows').append(tr)}syncSelection()}
 async function select(id){selected=id;mapView?.select(id);document.querySelectorAll('#rows tr').forEach(r=>r.classList.toggle('selected',Number(r.dataset.id)===id));try{showDetail(await api('node',{id}))}catch(e){status(e.message)}}
 function showDetail(row){const content=el('div',null,'detail-content');content.append(el('span',null,'icon big '+(row.directory?'folder':'file')),el('h2',row.name),el('div',row.path,'detail-path'));const open=el('button',row.directory?'在资源管理器中打开':'在资源管理器中选中');open.onclick=()=>explorer(row);const copy=el('button','复制完整路径');copy.onclick=()=>copyPath(row);content.append(open,copy);const dl=el('dl');const add=(label,value)=>dl.append(el('dt',label),el('dd',value));add(row.directory?'已知逻辑总量':'逻辑大小',fmt(row.logical));add(row.directory?'已归属磁盘占用':'磁盘占用',fmt(row.allocated));if(row.directory){add('直属子项',num(row.child_count));add('后代未知大小文件',num(row.unknown))}else{add('硬链接数量',num(row.links));add('解析状态',row.unknown?'未完成大小解析':'已解析');const streams=row.metadata?.streams||[];add('当前记录中的数据流',num(streams.length))}add('文件记录号',String(row.id));content.append(dl);const note=row.unknown?'大小未完整解析，不能根据此数值判断可以释放多少空间。':row.directory?(meta.report.allocation_model?'磁盘占用包含命名数据流、目录索引和属性列表。硬链接按一个父目录归属计入，跨目录不重复累计。':'目录按一个父目录归属累计；命名流与目录索引等尚未计入。'):'数据簇占用不是删除后保证释放量，硬链接仍存在时可能不释放。';content.append(el('p',note,'detail-note'));$('details').replaceChildren(content)}
 function treeNode(row,depth){
@@ -51,7 +129,7 @@ async function loadMap(id){
 }
 async function init(){
  try{
-  meta=await api('meta');const r=meta.report;const scope=meta.scope||r;rootId=meta.root.id;parent=rootId;mapRequest++;hideContext();mode='tree';offset=0;query='';selected=null;requestId++;
+  meta=await api('meta');selectedItems.clear();pageRows=[];adviceData=null;if($('planPreview').open)$('planPreview').close();syncSelection();const r=meta.report;const scope=meta.scope||r;rootId=meta.root.id;parent=rootId;mapRequest++;hideContext();mode='tree';offset=0;query='';selected=null;requestId++;
   $('search').value='';$('treeTab').classList.add('active');$('filesTab').classList.remove('active');$('searchForm').classList.add('hidden');
   $('heading').textContent=(scope.folder?meta.root.name:r.drive)+' 空间浏览';$('indexTime').textContent='索引生成于 '+meta.index_time.replace('T',' ');
   $('targetPath').value=scope.target||r.drive+'\\';$('driveSelect').value=r.drive+'\\';
@@ -101,6 +179,8 @@ async function pollScan(){
 }
 async function startScan(){if(scanning)return;const target=$('targetPath').value.trim();try{scanControls(true);$('scanPhase').textContent='提交只读扫描请求';$('scanProgress').removeAttribute('value');$('scanElapsed').textContent='总用时 0.00s';$('scanRecords').textContent='如弹出 Windows 管理员授权，请确认后继续。';await api('scan',{}, {target});await pollScan()}catch(e){scanControls(false);status(e.message);$('scanPhase').textContent='未开始扫描';$('scanRecords').textContent=e.message;$('scanProgress').value=0}}
 async function pickFolder(){try{$('pickFolder').disabled=true;await api('pick-folder',{},{});$('scanPhase').textContent='请在系统窗口选择文件夹';const check=async()=>{try{const state=await api('picker-status');if(state.status==='waiting')return setTimeout(check,300);$('pickFolder').disabled=scanning;if(state.path){$('targetPath').value=state.path;$('driveSelect').value=state.path.slice(0,2).toUpperCase()+'\\';$('scanPhase').textContent='文件夹已选择，点击开始扫描';$('scanRecords').textContent='文件夹模式会扫描所在卷，再显示所选目录范围。'}else if(state.error)status(state.error);else $('scanPhase').textContent='已取消选择'}catch(e){$('pickFolder').disabled=scanning;status(e.message)}};check()}catch(e){$('pickFolder').disabled=scanning;status(e.message)}}
+$('reloadPlan').onclick=()=>{adviceData=null;loadAdvice()};$('previewSelection').onclick=previewSelection;$('closePreview').onclick=()=>{previewRequest++;$('planPreview').close()};$('clearSelection').onclick=()=>{selectedItems.clear();syncSelection()};$('selectAdvice').onclick=()=>{for(const row of adviceRowsVisible)addSelection(row);syncSelection()};$('selectPage').onchange=()=>{for(const row of pageRows){if($('selectPage').checked)addSelection(row);else selectedItems.delete(row.id)}syncSelection()};$('minFileSize').onchange=$('fileType').onchange=()=>{offset=0;load()};
+$('adviceTab').onclick=()=>switchMode('advice');$('adviceGoal').onsubmit=e=>{e.preventDefault();renderGoal()};$('goalSpace').oninput=renderGoal;document.querySelectorAll('[data-advice-filter]').forEach(b=>b.onclick=()=>{adviceFilter=b.dataset.adviceFilter;renderAdvice()});
 $('treeTab').onclick=()=>switchMode('tree');$('filesTab').onclick=()=>switchMode('files');$('metric').onchange=()=>{offset=0;load();loadMap(mode==='files'?rootId:parent)};$('home').onclick=()=>navigate(rootId);
 $('back').onclick=async()=>{if(parent<0||parent===rootId)return navigate(rootId);const row=await api('node',{id:parent});const id=Number(BigInt(row.metadata.parent_reference)&((1n<<48n)-1n));navigate(id===parent?rootId:id)};
 $('prev').onclick=()=>{offset=Math.max(0,offset-pageSize);load()};$('next').onclick=()=>{offset+=pageSize;load()};$('searchForm').onsubmit=e=>{e.preventDefault();query=$('search').value.trim();offset=0;load()};

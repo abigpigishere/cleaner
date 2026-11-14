@@ -10,6 +10,8 @@ from urllib.parse import urlsplit,parse_qs
 from view_scan import Viewer
 from viewer_jobs import Controller,drives
 from viewer_shell import open_explorer
+from cleanup_advice import build_advice
+from cleanup_plan import PlanStore,operation_info
 
 
 def main():
@@ -78,7 +80,7 @@ def main():
                 return self.send(403,{'error':'Invalid request origin/token'})
             try:
                 length=int(self.headers.get('Content-Length','0'))
-                if not 0<length<=8192 or self.headers.get_content_type()!='application/json':
+                if not 0<length<=262144 or self.headers.get_content_type()!='application/json':
                     return self.send(400,{'error':'Invalid JSON request'})
                 body=json.loads(self.rfile.read(length))
                 route,_=match
@@ -86,6 +88,10 @@ def main():
                     value=controller.start(body.get('target'))
                 elif route=='api/pick-folder':
                     value=controller.pick()
+                elif route in ('api/plan','api/preview'):
+                    with controller.viewer_lock:
+                        store=PlanStore(controller.viewer)
+                        value=store.save(body) if route=='api/plan' else store.preview(body)
                 elif route=='api/explorer':
                     with controller.viewer_lock:
                         value=open_explorer(controller.viewer,int(body['id']))
@@ -119,6 +125,16 @@ def main():
                                'scope':viewer.scope_info(),'generation':controller.generation,
                                'index_time':datetime.fromtimestamp((viewer.directory/'index.bin').stat().st_mtime).isoformat(timespec='seconds'),
                                'root':viewer.row(viewer.root),'orphans':len(viewer.orphans),'disk':viewer.disk_usage(),'idle_minutes':args.idle_minutes}
+                    elif route=='api/advice':
+                        value=PlanStore(viewer).response()
+                        value['rows']=value.pop('items')
+                    elif route=='api/plan':
+                        store=PlanStore(viewer);value=store.load()[0]
+                    elif route=='api/preview':
+                        path=viewer.directory/'preview.json'
+                        if not path.exists():raise ValueError('还没有生成处理预览')
+                        value=json.loads(path.read_text(encoding='utf-8'))
+                        if value.get('scan_id')!=PlanStore(viewer).scan_id:raise ValueError('预览与当前扫描不匹配')
                     elif route=='api/list':
                         mode=get('mode','tree')
                         metric=get('metric','allocated')
@@ -128,7 +144,10 @@ def main():
                         query=get('query','')
                         if offset<0 or not 1<=limit<=200 or len(query)>160:
                             raise ValueError('Invalid page bounds/query')
-                        value=viewer.listing(mode,int(get('parent',str(viewer.root))),metric,query,offset,limit,get('dirs','0')=='1')
+                        minimum=int(get('min_bytes','0'));file_type=get('type','all')
+                        if not 0<=minimum<=2**63-1:raise ValueError('大小筛选无效')
+                        value=viewer.listing(mode,int(get('parent',str(viewer.root))),metric,query,offset,limit,get('dirs','0')=='1',minimum,file_type)
+                        for row in value['rows']:row.update(operation_info(viewer,row))
                     elif route=='api/node':
                         number=int(get('id',str(viewer.root)))
                         if not viewer.permits(number):

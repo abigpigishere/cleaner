@@ -238,15 +238,26 @@ class Viewer:
         self.cache.move_to_end(key)
         return self.cache[key]
 
-    def listing(self,mode,parent,metric,query,offset,limit,dirs_only):
+    def listing(self,mode,parent,metric,query,offset,limit,dirs_only,min_bytes=0,file_type='all'):
         started=time.perf_counter()
         if mode=='files':
             if metric not in self.file_orders:
                 self.file_orders[metric]=array('I',sorted(self.files,key=lambda n:self.size(n,metric),reverse=True))
             ids=self.file_orders[metric]
+            categories={'all':None,'archive':{'zip','7z','rar','tar','gz','bz2'},'installer':{'exe','msi','msix','msixbundle','appx','appxbundle'},'video':{'mp4','mkv','mov','avi','wmv','webm','flv'},'disk':{'iso','vhd','vhdx','vmdk','vdi','img'}}
+            if file_type not in categories:raise ValueError('文件类型筛选无效')
+            if min_bytes or file_type!='all':
+                def filtered():
+                    numbers=np.asarray(ids,dtype=np.uint32)
+                    mask=self.map_weights[metric][numbers]>=min_bytes
+                    if file_type!='all':
+                        ext_ids=[i for i,e in enumerate(self.map_exts) if e in categories[file_type]]
+                        mask&=np.isin(self.map_ext[numbers],ext_ids)
+                    return array('I',numbers[mask].tolist())
+                ids=self.cached(('large-files',metric,min_bytes,file_type),filtered)
             if query:
                 lowered=query.casefold()
-                ids=self.cached(('search',metric,lowered),lambda:array('I',(n for n in ids if lowered in self.name(n).casefold())))
+                ids=self.cached(('search',metric,min_bytes,file_type,lowered),lambda:array('I',(n for n in ids if lowered in self.name(n).casefold())))
         else:
             if parent==-1:
                 source=()
